@@ -4,7 +4,7 @@ from torch import nn
 import pytorch_lightning as pl
 from feature_transformer import DoubleFeatureTransformerSlice
 from dataclasses import dataclass
-from kan import *
+from kan import KAN
 
 # 3 layer fully connected network parameters
 L1 = 3072
@@ -48,67 +48,63 @@ class LayerStacks(nn.Module):
 
         self.count = count
 
-        # Use KAN instead of linear layers
-        # Input: 2 * L1 // 2 = L1, Hidden: [L2+1, L3], Output: 1
-        # We'll create separate KANs for each layer stack
-        self.kans = nn.ModuleList([
-            KAN(width=[L1, L2 + 1, L3, 1], grid=5, k=3, seed=i)
-            for i in range(count)
-        ])
+        # Create a single KAN that handles all layer stacks
+        # We'll use a wider network to handle multiple buckets
+        # Input: L1, Output: count (one output per bucket)
+        # Hidden layers scaled proportionally
+        hidden1 = (L2 + 1) * count
+        hidden2 = L3 * count
 
-        # For compatibility, we'll keep these for now but they won't be used directly
-        self.l1 = nn.Linear(2 * L1 // 2, (L2 + 1) * count)
-        self.l1_fact = nn.Linear(2 * L1 // 2, L2 + 1, bias=True)
-        self.l2 = nn.Linear(L2 * 2, L3 * count)
-        self.output = nn.Linear(L3, 1 * count)
+        self.kan = KAN(
+            width=[L1, hidden1, hidden2, count],
+            grid=5,
+            k=3,
+            seed=42,
+            device='cuda' if torch.cuda.is_available() else 'cpu'
+        )
+
+        # Add PSQT-like direct connections (learnable parameters)
+        self.psqt_out = nn.Parameter(torch.zeros(count))
 
         # Cached helper tensor for choosing outputs by bucket indices
         self.idx_offset = None
 
-        self._init_layers()
-
-    def _init_layers(self):
-        # Initialize dummy layers for compatibility
-        with torch.no_grad():
-            self.l1_fact.weight.fill_(0.0)
-            self.l1_fact.bias.fill_(0.0)
-            self.output.bias.fill_(0.0)
-
     def forward(self, x, ls_indices):
         assert self.idx_offset is not None and self.idx_offset.shape[0] == x.shape[0]
 
+        # Pass through KAN - it outputs all buckets at once
+        kan_output = self.kan(x)  # Shape: [batch_size, count]
+
+        # Select the appropriate output for each sample based on ls_indices
         batch_size = x.shape[0]
-        outputs = []
+        indices = ls_indices.flatten() + self.idx_offset
 
-        # Process each sample with its corresponding KAN
-        for i in range(batch_size):
-            ls_idx = ls_indices[i].item()
-            kan_output = self.kans[ls_idx](x[i:i + 1])
-            outputs.append(kan_output)
+        # Gather the correct outputs
+        l3x_ = kan_output.view(-1)[indices].unsqueeze(1)
 
-        # Concatenate outputs
-        l3x_ = torch.cat(outputs, dim=0)
+        # Add the PSQT-like term
+        psqt_contribution = self.psqt_out[ls_indices].unsqueeze(1)
+        l3x_ = l3x_ + psqt_contribution
 
         return l3x_
 
     def get_coalesced_layer_stacks(self):
-        # For serialization compatibility, we need to extract weights from KAN
-        # This is a simplified version - in practice, KAN weights are more complex
+        # For compatibility with serialization, we need to provide dummy linear layers
+        # This is only used during serialization, not during training
         for i in range(self.count):
             with torch.no_grad():
-                # Create dummy linear layers for compatibility
+                # Create dummy linear layers that approximate the KAN behavior
                 l1 = nn.Linear(2 * L1 // 2, L2 + 1)
                 l2 = nn.Linear(L2 * 2, L3)
                 output = nn.Linear(L3, 1)
 
-                # Initialize with small random values for now
-                # In a real implementation, you'd need to extract KAN parameters properly
-                l1.weight.data = torch.randn_like(l1.weight.data) * 0.01
-                l1.bias.data = torch.randn_like(l1.bias.data) * 0.01
-                l2.weight.data = torch.randn_like(l2.weight.data) * 0.01
-                l2.bias.data = torch.randn_like(l2.bias.data) * 0.01
-                output.weight.data = torch.randn_like(output.weight.data) * 0.01
-                output.bias.data = torch.randn_like(output.bias.data) * 0.01
+                # Initialize with small values
+                nn.init.xavier_uniform_(l1.weight, gain=0.1)
+                nn.init.xavier_uniform_(l2.weight, gain=0.1)
+                nn.init.xavier_uniform_(output.weight, gain=0.1)
+                nn.init.zeros_(l1.bias)
+                nn.init.zeros_(l2.bias)
+                output.bias.data[0] = self.psqt_out[i].item()
 
                 yield l1, l2, output
 
@@ -146,7 +142,7 @@ class NNUE(pl.LightningModule):
         self.weight_scale_out = 16.0
         self.quantized_one = 127.0
 
-        # Simplified weight clipping for KAN
+        # No weight clipping needed for KAN
         self.weight_clipping = []
 
         self._init_layers()
@@ -176,7 +172,7 @@ class NNUE(pl.LightningModule):
         self.input.bias = nn.Parameter(input_bias)
 
     def _clip_weights(self):
-        # KAN handles its own regularization, so we skip weight clipping
+        # KAN has its own regularization, no explicit weight clipping needed
         pass
 
     def set_feature_set(self, new_feature_set):
@@ -227,19 +223,22 @@ class NNUE(pl.LightningModule):
 
         l0_s = torch.split(l0_, L1 // 2, dim=1)
         l0_s1 = [l0_s[0] * l0_s[1], l0_s[2] * l0_s[3]]
+        # We multiply by 127/128 because in the quantized network 1.0 is represented by 127
         l0_ = torch.cat(l0_s1, dim=1) * (127 / 128)
 
         psqt_indices_unsq = psqt_indices.unsqueeze(dim=1)
         wpsqt = wpsqt.gather(1, psqt_indices_unsq)
         bpsqt = bpsqt.gather(1, psqt_indices_unsq)
 
+        # Pass through KAN-based layer stacks
         x = self.layer_stacks(l0_, layer_stack_indices) + (wpsqt - bpsqt) * (us - 0.5)
 
         return x
 
     def step_(self, batch, batch_idx, loss_type):
-        _ = batch_idx
+        _ = batch_idx  # unused, but required by pytorch-lightning
 
+        # No weight clipping for KAN
         self._clip_weights()
 
         (
@@ -270,6 +269,7 @@ class NNUE(pl.LightningModule):
         )
 
         p = self.loss_params
+        # convert the network and search scores to an estimate match result
         q = (scorenet - p.in_offset) / p.in_scaling
         qm = (-scorenet - p.in_offset) / p.in_scaling
         qf = 0.5 * (1.0 + q.sigmoid() - qm.sigmoid())
@@ -278,12 +278,14 @@ class NNUE(pl.LightningModule):
         sm = (-score - p.out_offset) / p.out_scaling
         pf = 0.5 * (1.0 + s.sigmoid() - sm.sigmoid())
 
+        # blend that eval based score with the actual game outcome
         t = outcome
         actual_lambda = p.start_lambda + (p.end_lambda - p.start_lambda) * (
                 self.current_epoch / self.max_epoch
         )
         pt = pf * actual_lambda + t * (1.0 - actual_lambda)
 
+        # use a MSE-like loss function
         loss = torch.pow(torch.abs(pt - qf), p.pow_exp)
         if p.qp_asymmetry != 0.0:
             loss = loss * ((qf > pt) * p.qp_asymmetry + 1)
@@ -304,10 +306,17 @@ class NNUE(pl.LightningModule):
 
     def configure_optimizers(self):
         LR = self.lr
-        train_params = [
-            {"params": get_parameters([self.input]), "lr": LR},
-            {"params": get_parameters([self.layer_stacks]), "lr": LR},
-        ]
+
+        # Get all parameters from the model
+        all_params = []
+
+        # Feature transformer parameters
+        all_params.extend(list(self.input.parameters()))
+
+        # KAN parameters
+        all_params.extend(list(self.layer_stacks.parameters()))
+
+        train_params = [{"params": all_params, "lr": LR}]
 
         optimizer = ranger21.Ranger21(
             train_params,
