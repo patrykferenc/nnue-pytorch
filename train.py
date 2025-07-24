@@ -42,15 +42,15 @@ class TimeLimitAfterCheckpoint(Callback):
 
 
 def make_data_loaders(
-    train_filenames,
-    val_filenames,
-    feature_set,
-    num_workers,
-    batch_size,
-    config: nnue_dataset.DataloaderSkipConfig,
-    main_device,
-    epoch_size,
-    val_size,
+        train_filenames,
+        val_filenames,
+        feature_set,
+        num_workers,
+        batch_size,
+        config: nnue_dataset.DataloaderSkipConfig,
+        main_device,
+        epoch_size,
+        val_size,
 ):
     # Epoch and validation sizes are arbitrary
     features_name = feature_set.name
@@ -184,6 +184,41 @@ def main():
         type=float,
         dest="qp_asymmetry",
         help="Adjust to loss for those if q (prediction) > p (reference) (default=0.0)",
+    )
+    parser.add_argument(
+        "--pow-exp",
+        default=2.5,
+        type=float,
+        dest="pow_exp",
+        help="exponent of the power law used for the mean error (default=2.5)",
+    )
+    parser.add_argument(
+        "--in-offset",
+        default=270,
+        type=float,
+        dest="in_offset",
+        help="offset for conversion to win on input (default=270.0)",
+    )
+    parser.add_argument(
+        "--out-offset",
+        default=270,
+        type=float,
+        dest="out_offset",
+        help="offset for conversion to win on input (default=270.0)",
+    )
+    parser.add_argument(
+        "--in-scaling",
+        default=340,
+        type=float,
+        dest="in_scaling",
+        help="scaling for conversion to win on input (default=340.0)",
+    )
+    parser.add_argument(
+        "--out-scaling",
+        default=380,
+        type=float,
+        dest="out_scaling",
+        help="scaling for conversion to win on input (default=380.0)",
     )
     parser.add_argument(
         "--gamma",
@@ -345,29 +380,57 @@ def main():
 
     feature_set = features.get_feature_set_from_name(args.features)
 
-    start_lambda = args.start_lambda or args.lambda_
-    end_lambda = args.end_lambda or args.lambda_
+    # Create loss parameters properly
+    loss_params = M.LossParams(
+        in_offset=args.in_offset,
+        in_scaling=args.in_scaling,
+        out_offset=args.out_offset,
+        out_scaling=args.out_scaling,
+        start_lambda=args.start_lambda or args.lambda_,
+        end_lambda=args.end_lambda or args.lambda_,
+        pow_exp=args.pow_exp,
+        qp_asymmetry=args.qp_asymmetry,
+    )
+    print("Loss parameters:")
+    print(loss_params)
+
     max_epoch = args.max_epochs or 800
+    num_batches_per_epoch = int(args.epoch_size / batch_size)
+
     if args.resume_from_model is None:
+        # Create NNUE with proper parameters
         nnue = M.NNUE(
             feature_set=feature_set,
-            start_lambda=start_lambda,
+            loss_params=loss_params,
             max_epoch=max_epoch,
-            num_batches_per_epoch=args.epoch_size / batch_size,
-            end_lambda=end_lambda,
-            qp_asymmetry=args.qp_asymmetry,
+            num_batches_per_epoch=num_batches_per_epoch,
             gamma=args.gamma,
             lr=args.lr,
             param_index=args.param_index,
         )
+        print(f"[DEBUG] NNUE model created successfully")
+
+        print(f"[DEBUG] NNUE model created successfully")
+
+        # Add detailed parameter analysis
+        print("\n[DEBUG] Detailed parameter breakdown:")
+        print(f"Feature transformer parameters:")
+        ft_params = sum(p.numel() for p in nnue.input.parameters())
+        print(f"  Weight: {nnue.input.weight.shape} = {nnue.input.weight.numel():,} params")
+        print(f"  Bias: {nnue.input.bias.shape} = {nnue.input.bias.numel():,} params")
+        print(f"  Total FT: {ft_params:,}")
+
+        print(f"\nLayer stacks parameters:")
+        ls_params = sum(p.numel() for p in nnue.layer_stacks.parameters())
+        print(f"  Total LS: {ls_params:,}")
+
+        print(f"\nGrand total: {ft_params + ls_params:,} parameters")
     else:
         nnue = torch.load(args.resume_from_model, weights_only=False)
         nnue.set_feature_set(feature_set)
-        nnue.start_lambda = start_lambda
-        nnue.end_lambda = end_lambda
-        nnue.qp_asymmetry = args.qp_asymmetry
+        nnue.loss_params = loss_params
         nnue.max_epoch = max_epoch
-        nnue.num_batches_per_epoch = args.epoch_size / batch_size
+        nnue.num_batches_per_epoch = num_batches_per_epoch
         # we can set the following here just like that because when resuming
         # from .pt the optimizer is only created after the training is started
         nnue.gamma = args.gamma
@@ -430,7 +493,11 @@ def main():
     )
 
     nnue = get_model_with_fixed_offset(nnue, batch_size, main_device)
+
+    # Skip torch.compile for KAN as it may not be fully compatible
     nnue = torch.compile(nnue, backend=args.compile_backend)
+    #print("Note: Skipping torch.compile for KAN compatibility")
+
     nnue.to(device=main_device)
 
     print("Using c++ data loader")
