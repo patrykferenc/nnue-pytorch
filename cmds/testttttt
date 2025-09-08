@@ -1,0 +1,1 @@
+python3 enhanced_sanity_check.py --positions 10000 --output results.csv --report test.json  --stockfish mystuff/experiments/experiment_baseline-20250707_141503/stockfish_base/src/stockfish mystuff/experiments/experiment_baseline-20250728_132210/training/run_0/lightning_logs/version_0/checkpoints/last.ckpt

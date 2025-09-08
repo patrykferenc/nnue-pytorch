@@ -1,0 +1,60 @@
+{
+  "summary": {
+    "total_positions": 10000,
+    "successful_evaluations": 10000,
+    "success_rate": 1.0
+  },
+  "correlation_analysis": {
+    "pearson": {
+      "r": 0.032355731942311144,
+      "p_value": 0.0012121061907408505
+    },
+    "spearman": {
+      "r": 0.03348595183425037,
+      "p_value": 0.0008106991982133641
+    },
+    "kendall": {
+      "tau": 0.030942752709031664,
+      "p_value": 3.5257141609749054e-06
+    },
+    "sample_size": 10000
+  },
+  "error_analysis": {
+    "mae": 613.6007711931131,
+    "mse": 897959.9281780092,
+    "rmse": 947.6074757925927,
+    "mean_error": -44.696723490966114,
+    "std_error": 946.5527619140843,
+    "max_abs_error": 5342.598964691162,
+    "median_abs_error": 344.0109499692917,
+    "error_percentiles": {
+      "p25": 135.27028861641884,
+      "p75": 819.8664815425873,
+      "p90": 1537.203524017334,
+      "p95": 2164.4080529212924,
+      "p99": 3385.3235751724264
+    }
+  },
+  "category_analysis": {
+    "opening": {
+      "count": 9999,
+      "valid_count": 9999,
+      "mae": 613.5993544476116,
+      "correlation": 0.032302778521498564
+    },
+    "middlegame": {
+      "count": 1,
+      "valid_count": 1,
+      "mae": 627.766809463501,
+      "correlation": null
+    }
+  },
+  "model_statistics": {
+    "mean_evaluation": -3.8203234909661115,
+    "std_evaluation": 908.8974221681641,
+    "evaluation_range": {
+      "min": -4115.598964691162,
+      "max": 5682.267379760742
+    }
+  }
+}

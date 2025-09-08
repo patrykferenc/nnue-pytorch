@@ -1,0 +1,11 @@
+python scripts/run_games.py mystuff/experiments/experiment_xxx/training \
+  --concurrency=4 \
+  --explore_factor=1.5 \
+  --c_chess_exe=mystuff/c-chess-cli/c-chess-cli \
+  --stockfish_base=mystuff/stockfish_base/src/stockfish \
+  --stockfish_test=mystuff/stockfish_test/src/stockfish \
+  --book_file_name=mystuff/books/UHO_Lichess_4852_v1.epd \
+  --nodes_per_move=10000 \
+  --hash=16 \
+  --games_per_round=400 \
+  --features=HalfKAv2_hm^

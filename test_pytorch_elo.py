@@ -13,6 +13,7 @@ import time
 import shutil
 import math
 import re
+import stat
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional
 from datetime import datetime
@@ -161,11 +162,41 @@ class GameRunner:
 
         pgn_files = []
 
+        # Get the directory containing the UCI engine script
+        engine_dir = Path(__file__).parent
+        engine_script = engine_dir / "pytorch_uci_engine.py"
+
+        # Create a wrapper script for proper environment setup
+        wrapper_script = engine_dir / "engine_wrapper.sh"
+        if sys.platform == "win32":
+            wrapper_script = engine_dir / "engine_wrapper.bat"
+            wrapper_content = f"""@echo off
+set PYTHONPATH={engine_dir};%PYTHONPATH%
+cd /d "{engine_dir}"
+{python_exe} "{engine_script}" %1
+"""
+        else:
+            wrapper_content = f"""#!/bin/bash
+export PYTHONPATH="{engine_dir}:$PYTHONPATH"
+cd "{engine_dir}"
+exec {python_exe} "{engine_script}" "$1"
+"""
+
+        # Write the wrapper script
+        with open(wrapper_script, 'w') as f:
+            f.write(wrapper_content)
+
+        if sys.platform != "win32":
+            os.chmod(wrapper_script,
+                     stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH)  # Make executable on Unix
+
         for info in checkpoint_infos:
-            # Create engine command
-            engine_script = Path(__file__).parent / "pytorch_uci_engine.py"
-            engine_cmd = f"{python_exe} {engine_script} {info['path']}"
+            # Use the wrapper script as the engine command
+            engine_cmd = f"{wrapper_script} {info['path']}"
             engine_name = f"pytorch_epoch{info['epoch']}"
+
+            logger.info(f"Starting engine: {engine_name}")
+            logger.info(f"Engine command: {engine_cmd}")
 
             # Run match
             pgn_file = self.run_match(

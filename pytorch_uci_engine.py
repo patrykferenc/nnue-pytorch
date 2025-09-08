@@ -6,29 +6,89 @@ This engine provides a UCI interface to play games with c-chess-cli.
 
 import sys
 import os
-import torch
-import chess
-import chess.pgn
-import numpy as np
-import time
 import traceback
 from typing import Optional, Tuple
-import logging
 
-# Add parent directory to path for imports
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import model as M
-import features
-from nnue_dataset import make_sparse_batch_from_fens, destroy_sparse_batch
+# CRITICAL: Redirect stderr to avoid breaking UCI communication
+# All errors must go to log file, not stdout/stderr
+class StderrToLog:
+    def __init__(self, logfile):
+        self.logfile = logfile
+        self.terminal = sys.stderr
 
-# Configure logging
+    def write(self, message):
+        with open(self.logfile, 'a') as f:
+            f.write(message)
+
+    def flush(self):
+        pass
+
+
+# Setup error logging before any imports that might fail
+log_dir = os.path.dirname(os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else __file__))
+log_file = os.path.join(log_dir, 'pytorch_engine_errors.log')
+sys.stderr = StderrToLog(log_file)
+
+try:
+    # Find nnue-pytorch directory - try multiple possible locations
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    possible_paths = [
+        script_dir,  # Same directory as script
+        os.path.dirname(script_dir),  # Parent directory
+        os.path.join(os.path.dirname(script_dir), 'nnue-pytorch'),
+        os.path.join(os.path.dirname(os.path.dirname(script_dir)), 'nnue-pytorch'),
+        '/workspace/nnue-pytorch',  # Absolute path fallback
+        os.getcwd(),  # Current working directory
+    ]
+
+    # Try to find the directory containing model.py
+    nnue_pytorch_dir = None
+    for path in possible_paths:
+        if os.path.exists(os.path.join(path, 'model.py')):
+            nnue_pytorch_dir = path
+            break
+
+    if nnue_pytorch_dir:
+        sys.path.insert(0, nnue_pytorch_dir)
+    else:
+        # Last resort - add all possible paths
+        for path in possible_paths:
+            if path not in sys.path:
+                sys.path.append(path)
+
+    import torch
+    import chess
+    import chess.pgn
+    import numpy as np
+    import time
+    import logging
+
+    import model as M
+    import features
+    from nnue_dataset import make_sparse_batch_from_fens, destroy_sparse_batch
+
+except ImportError as e:
+    # Fatal error - write to log and exit
+    with open(log_file, 'a') as f:
+        f.write(f"FATAL: Import error: {e}\n")
+        f.write(f"sys.path: {sys.path}\n")
+        f.write(f"Working directory: {os.getcwd()}\n")
+        traceback.print_exc(file=f)
+    # Send minimal UCI response to avoid hanging
+    print("id name PyTorchNNUE_ImportError")
+    print("id author Error")
+    print("uciok")
+    sys.exit(1)
+
+# Configure logging to file only (never to stdout/stderr)
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('pytorch_engine.log'),
-    ]
+        logging.FileHandler(os.path.join(log_dir, 'pytorch_engine.log')),
+    ],
+    force=True  # Override any existing configuration
 )
 
 
@@ -337,18 +397,34 @@ class PyTorchNNUEEngine:
 
 def main():
     """Main entry point for UCI engine"""
+    # Ensure we have a model path argument
     if len(sys.argv) < 2:
-        print("Usage: python pytorch_uci_engine.py <model.ckpt>", file=sys.stderr)
+        print("id name PyTorchNNUE_Error")
+        print("id author Error")
+        print("uciok")
+        logging.error("No model path provided")
         sys.exit(1)
 
     model_path = sys.argv[1]
 
     if not os.path.exists(model_path):
-        print(f"Model file not found: {model_path}", file=sys.stderr)
+        print("id name PyTorchNNUE_ModelNotFound")
+        print("id author Error")
+        print("uciok")
+        logging.error(f"Model file not found: {model_path}")
         sys.exit(1)
 
-    engine = PyTorchNNUEEngine(model_path)
-    engine.run()
+    try:
+        engine = PyTorchNNUEEngine(model_path)
+        engine.run()
+    except Exception as e:
+        # Log the error but still try to respond with UCI
+        logging.error(f"Fatal error: {e}")
+        traceback.print_exc(file=open(log_file, 'a'))
+        print("id name PyTorchNNUE_InitError")
+        print("id author Error")
+        print("uciok")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

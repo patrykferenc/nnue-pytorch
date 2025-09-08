@@ -1,0 +1,14 @@
+
+| Name         | Type                          | Params | Mode
+-----------------------------------------------------------------------
+0 | input        | DoubleFeatureTransformerSlice | 71.8 M | train
+1 | layer_stacks | LayerStacks                   | 450 K  | train
+-----------------------------------------------------------------------
+72.2 M    Trainable params
+0         Non-trainable params
+72.2 M    Total params
+288.822   Total estimated model params size (MB)
+6         Modules in train mode
+0         Modules in eval mode
+Using c++ data loader
+Ranger21 optimizer ready with following settings:
