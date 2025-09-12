@@ -6,7 +6,7 @@ python scripts/easy_train.py \
     --gpus=0 \
     --runs-per-gpu=1 \
     --batch-size=2048 \
-    --max_epoch=620 \
+    --max_epoch=820 \
     --network-save-period=20 \
     --do-network-training=True \
     --do-network-testing=False \

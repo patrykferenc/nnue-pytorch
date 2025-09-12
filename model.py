@@ -106,8 +106,8 @@ class LayerStacks(nn.Module):
 
         self.kan = KAN(
             width=[L1, hidden1, hidden2, count],
-            grid=3,
-            k=3,
+            grid=2,
+            k=2,
             seed=42,
             device='cuda' if torch.cuda.is_available() else 'cpu',
             auto_save=False,
