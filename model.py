@@ -8,8 +8,8 @@ from kan import KAN
 
 # 3 layer fully connected network parameters
 L1 = 3072
-L2 = 5
-L3 = 8
+L2 = 2
+L3 = 4
 
 
 # parameters needed for the definition of the loss
@@ -103,8 +103,8 @@ class LayerStacks(nn.Module):
         # Deeper KAN with more layers for better approximation
         self.l2_kan = KAN(
             width=[L2 * 2, L3 * count],
-            grid=3,
-            k=3,
+            grid=2,
+            k=2,
             seed=42,
             device='cuda' if torch.cuda.is_available() else 'cpu',
             auto_save=False,
