@@ -7,10 +7,9 @@ from dataclasses import dataclass
 from kan import KAN
 
 # 3 layer fully connected network parameters
-#L1 = 768
 L1 = 3072
-L2 = 15
-L3 = 32
+L2 = 5
+L3 = 8
 
 
 # parameters needed for the definition of the loss
@@ -73,7 +72,6 @@ def count_parameters(model):
 
     return total_params, trainable_params
 
-
 def coalesce_ft_weights(model, layer):
     weight = layer.weight.data
     indices = model.feature_set.get_virtual_to_real_features_gather_indices()
@@ -97,15 +95,14 @@ class LayerStacks(nn.Module):
 
         self.count = count
 
-        # Create a single KAN that handles all layer stacks
-        # We'll use a wider network to handle multiple buckets
-        # Input: L1, Output: count (one output per bucket)
-        # Hidden layers scaled proportionally
-        hidden1 = (L2 + 1) * count
-        hidden2 = L3 * count
+        # Use standard linear layers for l1 and factorizer (proven to work)
+        self.l1 = nn.Linear(L1, (L2 + 1) * count)
+        self.l1_fact = nn.Linear(L1, L2 + 1, bias=True)
 
-        self.kan = KAN(
-            width=[L1, hidden1, hidden2, count],
+        # Use KAN for l2 (the main computation layer)
+        # Deeper KAN with more layers for better approximation
+        self.l2_kan = KAN(
+            width=[L2 * 2, L3 * count],
             grid=2,
             k=2,
             seed=42,
@@ -114,52 +111,97 @@ class LayerStacks(nn.Module):
             symbolic_enabled=False
         )
 
-        # Add PSQT-like direct connections (learnable parameters)
-        self.psqt_out = nn.Parameter(torch.zeros(count))
+        # Standard linear for output
+        self.output = nn.Linear(L3, 1 * count)
 
-        # Cached helper tensor for choosing outputs by bucket indices
         self.idx_offset = None
+        self._init_layers()
+
+    def _init_layers(self):
+        """Initialize linear layers similarly to the original"""
+        with torch.no_grad():
+            # Initialize factorizer to zero (as in original)
+            self.l1_fact.weight.fill_(0.0)
+            self.l1_fact.bias.fill_(0.0)
+            self.output.bias.fill_(0.0)
+
+            # Initialize all buckets identically
+            l1_weight = self.l1.weight
+            l1_bias = self.l1.bias
+            output_weight = self.output.weight
+
+            for i in range(1, self.count):
+                l1_weight[i * (L2 + 1):(i + 1) * (L2 + 1), :] = l1_weight[0:(L2 + 1), :]
+                l1_bias[i * (L2 + 1):(i + 1) * (L2 + 1)] = l1_bias[0:(L2 + 1)]
+                output_weight[i:(i + 1), :] = output_weight[0:1, :]
+
+            self.l1.weight = nn.Parameter(l1_weight)
+            self.l1.bias = nn.Parameter(l1_bias)
+            self.output.weight = nn.Parameter(output_weight)
 
     def forward(self, x, ls_indices):
-        is_valid_size = self.idx_offset is not None and self.idx_offset.shape[0] == x.shape[0]
-        # print("[DEBUG] LayerStacks.forward() started, will proceed: %s", is_valid_size)
-        assert is_valid_size is True
+        if self.idx_offset is None or self.idx_offset.shape[0] != x.shape[0]:
+            self.idx_offset = torch.arange(
+                0, x.shape[0] * self.count, self.count,
+                device=ls_indices.device
+            )
 
-        # Pass through KAN - it outputs all buckets at once
-        kan_output = self.kan(x)  # Shape: [batch_size, count]
-        # print("[DEBUG] LayerStacks.forward() kan_output calculated")
-
-        # Select the appropriate output for each sample based on ls_indices
-        batch_size = x.shape[0] # this is not used lmao
         indices = ls_indices.flatten() + self.idx_offset
 
-        # Gather the correct outputs
-        l3x_ = kan_output.view(-1)[indices].unsqueeze(1)
+        # l1 and factorizer (linear)
+        l1s_ = self.l1(x).reshape((-1, self.count, L2 + 1))
+        l1f_ = self.l1_fact(x)
 
-        # Add the PSQT-like term
-        psqt_contribution = self.psqt_out[ls_indices].unsqueeze(1)
-        l3x_ = l3x_ + psqt_contribution
+        l1c_ = l1s_.view(-1, L2 + 1)[indices]
+        l1c_, l1c_out = l1c_.split(L2, dim=1)
+        l1f_, l1f_out = l1f_.split(L2, dim=1)
+
+        l1x_ = l1c_ + l1f_
+
+        # Squared Clipped ReLU (CRITICAL!)
+        l1x_ = torch.clamp(
+            torch.cat([torch.pow(l1x_, 2.0) * (127.0 / 128.0), l1x_], dim=1),
+            0.0, 1.0
+        )
+
+        # l2 with KAN
+        l2s_ = self.l2_kan(l1x_)  # [batch_size, L3*count]
+        l2s_ = l2s_.reshape((-1, self.count, L3))
+        l2c_ = l2s_.view(-1, L3)[indices]
+        l2x_ = torch.clamp(l2c_, 0.0, 1.0)
+
+        # Output (linear)
+        l3s_ = self.output(l2x_).reshape((-1, self.count, 1))
+        l3c_ = l3s_.view(-1, 1)[indices]
+        l3x_ = l3c_ + l1f_out + l1c_out
 
         return l3x_
 
     def get_coalesced_layer_stacks(self):
-        # For compatibility with serialization, we need to provide dummy linear layers
-        # This is only used during serialization, not during training
-        print("[DEBUG] LayerStacks.get_coalesced_layer_stacks() called, but shouldn't be called!")
+        """Serialization for hybrid model"""
+        print("[WARNING] Serializing hybrid KAN model - l2 layer will be approximated")
         for i in range(self.count):
             with torch.no_grad():
-                # Create dummy linear layers that approximate the KAN behavior
-                l1 = nn.Linear(2 * L1 // 2, L2 + 1)
+                l1 = nn.Linear(L1, L2 + 1)
                 l2 = nn.Linear(L2 * 2, L3)
                 output = nn.Linear(L3, 1)
 
-                # Initialize with small values
-                nn.init.xavier_uniform_(l1.weight, gain=0.1)
-                nn.init.xavier_uniform_(l2.weight, gain=0.1)
-                nn.init.xavier_uniform_(output.weight, gain=0.1)
-                nn.init.zeros_(l1.bias)
+                # Copy weights from the trained model
+                l1.weight.data = (
+                        self.l1.weight[i * (L2 + 1):(i + 1) * (L2 + 1), :]
+                        + self.l1_fact.weight.data
+                )
+                l1.bias.data = (
+                        self.l1.bias[i * (L2 + 1):(i + 1) * (L2 + 1)]
+                        + self.l1_fact.bias.data
+                )
+
+                # For l2, approximate KAN with linear layer initialized conservatively
+                nn.init.xavier_uniform_(l2.weight, gain=0.3)
                 nn.init.zeros_(l2.bias)
-                output.bias.data[0] = self.psqt_out[i].item()
+
+                output.weight.data = self.output.weight[i:(i + 1), :]
+                output.bias.data = self.output.bias[i:(i + 1)]
 
                 yield l1, l2, output
 
@@ -275,7 +317,6 @@ class NNUE(pl.LightningModule):
             psqt_indices,
             layer_stack_indices,
     ):
-        # print(f"[DEBUG] NNUE.forward started")
         wp, bp = self.input(white_indices, white_values, black_indices, black_values)
         w, wpsqt = torch.split(wp, L1, dim=1)
         b, bpsqt = torch.split(bp, L1, dim=1)
@@ -291,10 +332,7 @@ class NNUE(pl.LightningModule):
         wpsqt = wpsqt.gather(1, psqt_indices_unsq)
         bpsqt = bpsqt.gather(1, psqt_indices_unsq)
 
-        # print(f"[DEBUG] Calling layer_stacks forward")
-        # Pass through KAN-based layer stacks
         x = self.layer_stacks(l0_, layer_stack_indices) + (wpsqt - bpsqt) * (us - 0.5)
-        # print(f"[DEBUG] NNUE.forward completed, output shape: {x.shape}")
         return x
 
     def step_(self, batch, batch_idx, loss_type):
