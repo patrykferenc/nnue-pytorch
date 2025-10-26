@@ -8,8 +8,8 @@ from kan import KAN
 
 # 3 layer fully connected network parameters
 L1 = 3072
-L2 = 15
-L3 = 32
+L2 = 12
+L3 = 28
 
 
 # parameters needed for the definition of the loss
