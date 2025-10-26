@@ -103,8 +103,8 @@ class LayerStacks(nn.Module):
         # Deeper KAN with more layers for better approximation
         self.l2_kan = KAN(
             width=[L2 * 2, L3 * count],
-            grid=2,
-            k=2,
+            grid=3,
+            k=3,
             seed=42,
             device='cuda' if torch.cuda.is_available() else 'cpu',
             auto_save=False,
